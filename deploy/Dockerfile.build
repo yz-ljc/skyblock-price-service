@@ -1,0 +1,12 @@
+FROM rust:1.98.1-alpine3.23 AS builder
+RUN apk add --no-cache build-base binutils bash coreutils findutils
+WORKDIR /src
+COPY Cargo.toml Cargo.lock config.example.toml THIRD_PARTY_NOTICES.txt ./
+COPY src ./src
+COPY scripts/package-linux.sh ./scripts/package-linux.sh
+COPY deploy/install.sh ./deploy/install.sh
+COPY docs ./docs
+RUN bash scripts/package-linux.sh
+
+FROM scratch AS package
+COPY --from=builder /src/dist/ /

@@ -1,0 +1,29 @@
+[package]
+name = "skyblock-price-service"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+description = "Bounded, official-only Hypixel SkyBlock price snapshots and search API"
+
+[dependencies]
+anyhow = "1"
+arc-swap = "1"
+axum = { version = "0.8", features = ["http1", "json", "query", "tokio"] }
+base64 = "0.22"
+flate2 = "1"
+fs2 = "0.4"
+httpdate = "1"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "gzip"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "time", "sync"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"

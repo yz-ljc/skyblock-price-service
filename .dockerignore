@@ -1,0 +1,8 @@
+.git
+target
+dist
+data
+logs
+config.toml
+.env*
+*.log

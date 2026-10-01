@@ -1,0 +1,13 @@
+/target
+/dist/
+/data/
+/config.toml
+/.env
+/.env.*
+!/.env.example
+/logs/
+*.log
+*.tmp
+/.idea/
+/.vscode/
+.DS_Store
