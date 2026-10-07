@@ -164,7 +164,8 @@ fn restore_auctions(state: &State, path: &Path) -> Result<()> {
     for (key, item) in &mut data.items {
         crate::nbt::validate_id(&item.id.0)?;
         ensure!(
-            item.variant.enchantments.len() <= 32 && key.0 == item.variant.key(&item.id.0),
+            item.variant.enchantments.len() <= crate::model::MAX_BOOK_ENCHANTMENTS
+                && key.0 == item.variant.key(&item.id.0),
             "invalid variant key"
         );
         ensure!(

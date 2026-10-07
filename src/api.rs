@@ -122,6 +122,7 @@ struct Sources {
     bazaar: SourceMeta,
     auctions: SourceMeta,
     skipped_auctions_without_id: usize,
+    skipped_auctions_invalid: usize,
 }
 
 fn sources(
@@ -137,6 +138,7 @@ fn sources(
         bazaar: source_meta(state, bazaar.last_updated, bazaar.fetched_at, now),
         auctions: source_meta(state, auctions.last_updated, auctions.fetched_at, now),
         skipped_auctions_without_id: auctions.skipped_without_id,
+        skipped_auctions_invalid: auctions.skipped_invalid,
     }
 }
 

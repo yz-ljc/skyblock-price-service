@@ -38,9 +38,10 @@ cleanup() {
 }
 trap cleanup EXIT
 bundle="$stage/skyblock-price-service"
-mkdir -p "$bundle/deploy" "$bundle/docs"
+mkdir -p "$bundle/scripts" "$bundle/docs"
 install -m 755 "$binary" "$bundle/skyblock-price-service"
-install -m 755 deploy/install.sh "$bundle/deploy/install.sh"
+install -m 755 run.sh "$bundle/run.sh"
+install -m 755 scripts/diagnose-upstream.sh "$bundle/scripts/diagnose-upstream.sh"
 install -m 644 config.example.toml THIRD_PARTY_NOTICES.txt "$bundle/"
 install -m 644 docs/deployment.md docs/api.md "$bundle/docs/"
 printf 'target=%s\nbuilt_at=%s\n' "$target" "$(date -u +%FT%TZ)" > "$bundle/BUILD_INFO.txt"

@@ -151,6 +151,8 @@ pub struct BazaarSnapshot {
     pub products: BTreeMap<Text<128>, BazaarQuote>,
 }
 
+pub const MAX_BOOK_ENCHANTMENTS: usize = 128;
+
 #[derive(Debug, Default, Deserialize, Serialize)]
 pub struct AuctionSnapshot {
     pub last_updated: u64,
@@ -158,6 +160,8 @@ pub struct AuctionSnapshot {
     pub total_auctions: usize,
     pub bin_auctions: usize,
     pub skipped_without_id: usize,
+    #[serde(default)]
+    pub skipped_invalid: usize,
     pub items: BTreeMap<Text<512>, AuctionItem>,
 }
 

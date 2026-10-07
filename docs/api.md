@@ -42,7 +42,8 @@
       "source": "Hypixel official API", "catalog_last_updated": 1790000000000,
       "bazaar": {"available": true, "last_updated": 1790000000000, "fetched_at": 1790000005000, "age_seconds": 10, "stale": false},
       "auctions": {"available": true, "last_updated": 1790000000000, "fetched_at": 1790000009000, "age_seconds": 10, "stale": false},
-      "skipped_auctions_without_id": 0
+      "skipped_auctions_without_id": 0,
+      "skipped_auctions_invalid": 0
     }
   },
   "message": "ok", "status": 200, "timestamp": 1790000010000
@@ -54,6 +55,11 @@
 异常 ID 的名称兜底为固定文本 `Unknown Item`。此规则同时适用于搜索和单物品价格接口，以及恢复的旧快照。
 `icon` 在既无目录元数据、也无头颅或附魔书元数据时为 null。
 `icon_key` 等于完整 `key`；宠物皮肤由最低挂牌物品的 NBT 提取，只返回 Mojang hash，不联网下载图片。
+
+`sources.skipped_auctions_invalid` 是当前已发布拍卖快照中因单件 NBT/身份校验失败、非法挂牌价格或
+分组 key 超限而排除的有效期内 BIN 数量，可能导致报价遗漏这些挂牌；不是历史累计值。
+缺少物品 ID 单独计入 `skipped_auctions_without_id`。这些计数也出现在 `/v1/status` 的 `sources` 中。
+页面 JSON、HTTP 或快照一致性失败仍拒绝发布，不计入单件跳过数。
 
 Bazaar 返回 `instant_buy`、`instant_sell`、`buy_order`、`sell_offer`、`buy_volume`、`sell_volume`。
 这些是当前最优盘口；buy order / sell offer 字段是参考盘口价，不保证立刻成交，也不包含税。

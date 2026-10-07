@@ -60,7 +60,7 @@ curl 'http://127.0.0.1:25577/health/ready'
 - 价格超过 300 秒标为 stale，超过 1 小时不再返回该市场的价格；时间阈值可配置。
   最低拍卖已到期时返回 null，而不猜测另一条价格。物品信息和 NPC 价格仍可查询。
 
-这些限制控制工作量，不等价于经过测量的 RSS 硬上限。Linux 部署用进程内存上限隔离资源；
+这些限制控制工作量，不等价于经过测量的 RSS 硬上限。直接运行不设置系统内存硬上限；
 先用 `/metrics` 和一次完整同步测量，再调整预算。依赖和 TLS 运行时也占用内存。
 
 ## 价格口径
@@ -70,11 +70,17 @@ curl 'http://127.0.0.1:25577/health/ready'
 - BIN 按单件价格比较，同时返回整笔挂牌价、数量、拍卖 UUID、到期时间。
   一组价格是抓取时可见记录的最低值，不保证用户打开拍卖时尚未被购买。
 - 普通物品按 SkyBlock ID 汇总，不进行附魔、星级、强化、颜色或重铸的价值估算。
+  装备的附魔只校验 NBT 结构，不受附魔书的附魔条数限制，也不创建附魔映射。
 - 附魔书按完整附魔名称/等级集合分组；多附魔书不会冒充单附魔书。
+  最多保留 128 个附魔，完整分组 key 最多 512 字节；超限整件跳过，不截断附魔集合。
 - 宠物按类型、品质、皮肤分组，最低价跨等级；返回最低挂牌宠物的经验 `pet_experience`。
   本版不把经验猜成等级，不提供指定等级估价。
 - 缺少 SkyBlock ID 的 BIN 不参与汇总，数量公开在 `sources.skipped_auctions_without_id`。
-  解析错误不静默忽略，整轮失败。非 BIN 的竞拍出价不当作成交价。
+  单件 BIN 的 NBT/身份解析失败、挂牌价格非法或分组 key 超限时跳过该件，数量公开在
+  `sources.skipped_auctions_invalid`；每页最多记录 3 条原因样例，并记录本页跳过总数。
+  这可能使相关物品的最低价缺少部分挂牌；不会把失败物品合并进普通物品价格。
+  HTTP、页面 JSON、页数/代际一致性或汇总容量校验失败仍保留旧快照，不发布失败页。
+  非 BIN 的竞拍出价不当作成交价。旧快照缺少新增计数时按 0 恢复。
 - 缺失价格使用 null，不用 0 代替；没有上架、过期和市场尚未加载均可通过来源信息区分。
 - 搜索支持英文名称、ID、附魔/宠物分组关键词，不自带中文翻译表。
 - 图标返回材质、颜色、模型、Mojang texture hash，不下载/渲染图片。`icon_key` 使用完整分组 key，供本地素材映射；
@@ -82,33 +88,24 @@ curl 'http://127.0.0.1:25577/health/ready'
 
 ## Linux 部署
 
-推荐使用 [上传二进制的一键部署](docs/deployment.md)：在 Windows 本机直接交叉编译，或通过 GitHub Actions 生成 Linux 安装包，
-上传后执行 `sudo bash deploy/install.sh`，通过 `http://服务器IP:25577` 访问。
-脚本安装预编译程序和 systemd 服务，保留 token、配置与快照，不修改系统防火墙。
-
-可以用 systemd，示例在 [`deploy/skyblock-price.service`](deploy/skyblock-price.service)。
-示例路径都需要按你的部署修改：
-
-- 程序：`/opt/skyblock-price-service/skyblock-price-service`
-- 配置：`/etc/skyblock-price-service.toml`，设置 `data_directory = "/var/lib/skyblock-price-service"`
-- 环境文件：`/etc/skyblock-price-service.env`，仅含 `PRICE_API_TOKEN=...`，权限 0600
-- 创建专用 `skyblock-price` 用户；systemd 的 `StateDirectory` 管理数据目录。
-- 默认 `MemoryHigh=256M`、`MemoryMax=512M` 是预算，不是实测占用。
-  应用超预算会被系统终止并重启，避免吃完宿主机内存。
-- 监听地址由配置中的 `bind` 控制，默认 `0.0.0.0:25577`。HTTP 直连仍需 Bearer token；
-  如需传输加密，可自行配置 HTTPS 反向代理。
-- `/health/live` 不依赖上游，`/health/ready` 要求三类数据已加载且价格未过期。
-  `/v1/status` 和 `/metrics` 需要认证。Linux `/metrics` 包含进程 RSS。
-
-也提供 Dockerfile。在目标架构构建：
+使用 [上传二进制、screen 运行](docs/deployment.md)：在 Windows 本机交叉编译，或通过 GitHub Actions 生成 Linux 安装包。
+服务器解压后运行：
 
 ```sh
-docker build -t skyblock-price-service .
-docker run --name skyblock-price-service --restart unless-stopped \
-  --memory=512m --cpus=2 --pids-limit=32 \
-  -p 25577:25577 --env-file /etc/skyblock-price-service.env \
-  -v skyblock-price-data:/app/data skyblock-price-service
+cd skyblock-price-service
+screen -S skyblock-price
+sh run.sh
 ```
+
+首次自动创建本地 `config.toml`、`.env` 和 `data/`；`cat .env` 查看访问 token。
+已有配置和 token 不覆盖，不需要 root，不安装系统服务，不修改防火墙。
+按 `Ctrl+A` 然后 `D` 保持运行并退出会话，`screen -r skyblock-price` 返回；`Ctrl+C` 停止。
+旧 systemd 部署先执行 `sudo systemctl disable --now skyblock-price`；保留旧 token 和缓存的步骤见部署文档。
+
+- 监听地址由 `config.toml` 的 `bind` 控制，默认 `0.0.0.0:25577`，查询仍需 Bearer token。
+- `/health/live` 不依赖上游，`/health/ready` 要求三类数据已加载且价格未过期。
+  `/v1/status` 和 `/metrics` 需要认证。Linux `/metrics` 包含进程 RSS。
+- 更新前先停止进程，覆盖解压新包后再运行 `sh run.sh`；本地配置、token 和缓存保留。
 
 本地检查：`cargo fmt --check`、`cargo clippy --locked -- -D warnings`、`cargo build --locked --release`。
 不依赖生产玩家、数据库或真实审核数据。

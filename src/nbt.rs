@@ -7,7 +7,7 @@ use serde::Deserialize;
 
 use crate::{
     config::Config,
-    model::{Text, Variant},
+    model::{MAX_BOOK_ENCHANTMENTS, Text, Variant},
 };
 
 #[derive(Default)]
@@ -49,6 +49,8 @@ pub fn identity(encoded: &str, config: &Config) -> Result<ItemIdentity> {
         nodes: 0,
         output: ItemIdentity::default(),
         pet_info: None,
+        enchantments_offset: None,
+        collect_enchantments: false,
     };
     ensure!(parser.byte()? == 10, "NBT root must be compound");
     parser.string()?;
@@ -75,8 +77,17 @@ pub fn identity(encoded: &str, config: &Config) -> Result<ItemIdentity> {
         parser.output.variant.pet_skin = pet.skin;
         parser.output.pet_experience = Some(pet.exp);
     }
-    if parser.output.id.as_deref() != Some("ENCHANTED_BOOK") {
-        parser.output.variant.enchantments.clear();
+    // ExtraAttributes.id can follow enchantments. Revisit only books after the
+    // first bounded traversal; equipment upgrades do not affect its price key.
+    if parser.output.id.as_deref() == Some("ENCHANTED_BOOK") {
+        if let Some(offset) = parser.enchantments_offset {
+            parser.cursor = offset;
+            parser.collect_enchantments = true;
+            let mut path = ["i", "tag", "ExtraAttributes", "enchantments"]
+                .map(str::to_owned)
+                .to_vec();
+            parser.value(10, &mut path, 5)?;
+        }
     }
     if let Some(id) = &parser.output.id {
         validate_id(id)?;
@@ -113,6 +124,8 @@ struct Parser<'a> {
     nodes: usize,
     output: ItemIdentity,
     pet_info: Option<String>,
+    enchantments_offset: Option<usize>,
+    collect_enchantments: bool,
 }
 
 impl Parser<'_> {
@@ -170,6 +183,14 @@ impl Parser<'_> {
         let field = path.last().map_or("", String::as_str);
         let extra_attributes =
             path.len() == 4 && path[0] == "i" && path[1] == "tag" && path[2] == "ExtraAttributes";
+        if extra_attributes && field == "enchantments" && !self.collect_enchantments {
+            ensure!(tag == 10, "enchantments must be compound");
+            ensure!(self.enchantments_offset.is_none(), "duplicate enchantments");
+            self.enchantments_offset = Some(self.cursor);
+        }
+        if self.collect_enchantments && path.len() == 5 {
+            ensure!(tag == 3, "enchantment level must be int");
+        }
         match tag {
             1 => {
                 let value = self.byte()?;
@@ -182,7 +203,8 @@ impl Parser<'_> {
             }
             3 => {
                 let value = self.int()?;
-                if path.len() == 5
+                if self.collect_enchantments
+                    && path.len() == 5
                     && path[0] == "i"
                     && path[1] == "tag"
                     && path[2] == "ExtraAttributes"
@@ -190,14 +212,17 @@ impl Parser<'_> {
                 {
                     ensure!(value > 0 && value <= 1000, "invalid enchantment level");
                     validate_component(field)?;
+                    ensure!(field.len() <= 64, "enchantment name limit exceeded");
                     ensure!(
-                        self.output.variant.enchantments.len() < 32,
+                        self.output.variant.enchantments.len() < MAX_BOOK_ENCHANTMENTS,
                         "too many enchantments"
                     );
-                    self.output
+                    let previous = self
+                        .output
                         .variant
                         .enchantments
                         .insert(Text(field.to_owned()), value as u32);
+                    ensure!(previous.is_none(), "duplicate enchantment");
                 }
             }
             4 | 6 => {

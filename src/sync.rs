@@ -498,6 +498,15 @@ fn bazaar(state: &State, upstream: &mut Upstream, deadline: Instant) -> Result<b
     Ok(true)
 }
 
+// Only item-local failures are isolated. Page JSON, transport and aggregate
+// budget failures still reject the page and retain the published snapshot.
+fn skip_invalid_auction(snapshot: &mut AuctionSnapshot, uuid: &str, reason: impl fmt::Display) {
+    snapshot.skipped_invalid += 1;
+    if snapshot.skipped_invalid <= 3 {
+        warn!(auction_uuid = uuid, error = %reason, "invalid BIN item skipped; at most 3 samples per page");
+    }
+}
+
 fn add_auction(
     state: &State,
     snapshot: &mut AuctionSnapshot,
@@ -508,11 +517,17 @@ fn add_auction(
         return Ok(());
     }
     snapshot.bin_auctions += 1;
-    ensure!(
-        raw.starting_bid > 0 && raw.starting_bid <= 10_000_000_000_000_000,
-        "invalid BIN price"
-    );
-    let item = nbt::identity(raw.item_bytes.data(), &state.config)?;
+    if raw.starting_bid == 0 || raw.starting_bid > 10_000_000_000_000_000 {
+        skip_invalid_auction(snapshot, &raw.uuid.0, "invalid BIN price");
+        return Ok(());
+    }
+    let item = match nbt::identity(raw.item_bytes.data(), &state.config) {
+        Ok(item) => item,
+        Err(error) => {
+            skip_invalid_auction(snapshot, &raw.uuid.0, error);
+            return Ok(());
+        }
+    };
     let Some(id) = item.id else {
         snapshot.skipped_without_id += 1;
         return Ok(());
@@ -534,7 +549,10 @@ fn add_auction(
     } else {
         None
     };
-    ensure!(key.len() <= 512, "variant key length limit exceeded");
+    if key.len() > 512 {
+        skip_invalid_auction(snapshot, &raw.uuid.0, "variant key length limit exceeded");
+        return Ok(());
+    }
     let price = valid_price(raw.starting_bid as f64 / item.quantity as f64)
         .ok_or_else(|| anyhow::anyhow!("invalid per-unit price"))?;
     if let Some(current) = snapshot.items.get_mut(key.as_str()) {
@@ -760,6 +778,13 @@ fn auction_page(
         |_, raw| add_auction(state, &mut part, raw, now),
     )?;
     validate_page(state, &meta, page)?;
+    if part.skipped_invalid > 0 {
+        warn!(
+            page,
+            skipped_invalid = part.skipped_invalid,
+            "auction page parsed with invalid BIN items excluded"
+        );
+    }
     Ok((meta, part))
 }
 
@@ -770,6 +795,7 @@ fn merge_auction_page(
 ) -> Result<()> {
     target.bin_auctions += part.bin_auctions;
     target.skipped_without_id += part.skipped_without_id;
+    target.skipped_invalid += part.skipped_invalid;
     for (key, mut item) in part.items {
         if let Some(current) = target.items.get_mut(&key) {
             let listings = current

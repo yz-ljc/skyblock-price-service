@@ -1,4 +1,5 @@
-# Copy to config.toml. Set PRICE_API_TOKEN in the environment (at least 24 characters).
+# sh run.sh creates config.toml and a persistent token in .env on first launch.
+# Direct binary launches require PRICE_API_TOKEN in the environment (at least 24 characters).
 bind = "0.0.0.0:25577"
 data_directory = "data"
 hypixel_base_url = "https://api.hypixel.net/"

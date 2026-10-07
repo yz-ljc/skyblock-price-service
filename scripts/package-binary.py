@@ -30,7 +30,7 @@ def main():
             raise ValueError("Expected a static executable without dynamic loader or dependencies")
 
     files = {"skyblock-price-service": (binary, 0o755)}
-    for name in ("deploy/install.sh", "scripts/diagnose-upstream.sh", "config.example.toml", "THIRD_PARTY_NOTICES.txt", "docs/deployment.md", "docs/api.md"):
+    for name in ("run.sh", "scripts/diagnose-upstream.sh", "config.example.toml", "THIRD_PARTY_NOTICES.txt", "docs/deployment.md", "docs/api.md"):
         # Git may check out CRLF on Windows; shell scripts and bundle text need LF.
         files[name] = ((root / name).read_bytes().replace(b"\r\n", b"\n"), 0o755 if name.endswith(".sh") else 0o644)
     version = subprocess.check_output(["rustc", "--version"], text=True).strip()
