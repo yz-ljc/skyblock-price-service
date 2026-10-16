@@ -284,6 +284,8 @@ pub fn run(state: Arc<State>) -> Result<()> {
         state.config.auction_interval_secs,
     ];
     let mut failures = [0u32; 3];
+    // Pending waves keep the same wall-clock deadline and HTTP-attempt budget.
+    let mut auction_cycle: Option<(Instant, Arc<AtomicUsize>)> = None;
     while state.running.load(Ordering::Relaxed) {
         for (index, source) in ["catalog", "bazaar", "auctions"].iter().enumerate() {
             if !state.running.load(Ordering::Relaxed) {
@@ -306,8 +308,34 @@ pub fn run(state: Arc<State>) -> Result<()> {
             let result = match index {
                 0 => catalog(&state, &mut upstream, deadline),
                 1 => bazaar(&state, &mut upstream, deadline),
-                _ => auctions(&state, &mut upstream, &assembly, deadline),
+                _ => {
+                    let (cycle_deadline, remaining) = auction_cycle.get_or_insert_with(|| {
+                        (
+                            deadline,
+                            Arc::new(AtomicUsize::new(
+                                state.config.auction_max_requests_per_cycle,
+                            )),
+                        )
+                    });
+                    let mut limited = upstream.with_request_budget(remaining.clone());
+                    auctions(&state, &mut limited, &assembly, *cycle_deadline)
+                }
             };
+            if index == 2
+                && !result
+                    .as_ref()
+                    .is_err_and(|error| error.is::<AuctionPending>())
+            {
+                let (_, remaining) = auction_cycle.take().expect("auction cycle initialized");
+                info!(
+                    requests = state.config.auction_max_requests_per_cycle
+                        - remaining.load(Ordering::Relaxed),
+                    cooldown_secs = intervals[index],
+                    "auction cycle ended"
+                );
+                // An incomplete generation cannot bypass the next full-cycle cooldown.
+                *assembly.lock().unwrap_or_else(|v| v.into_inner()) = AuctionAssembly::default();
+            }
             state.refreshing.store(false, Ordering::Relaxed);
             let duration = started.elapsed().as_millis() as u64;
             let delay = match result {
@@ -341,7 +369,11 @@ pub fn run(state: Arc<State>) -> Result<()> {
                     if state.running.load(Ordering::Relaxed) {
                         warn!(source, error = %message, "sync failed; previous snapshot retained");
                     }
-                    (2u64.pow(failures[index]) * 5).min(intervals[index].max(30))
+                    if index == 2 {
+                        intervals[index]
+                    } else {
+                        (2u64.pow(failures[index]) * 5).min(intervals[index].max(30))
+                    }
                 }
             };
             {

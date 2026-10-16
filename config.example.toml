@@ -13,9 +13,14 @@ max_retry_delay_secs = 60
 
 catalog_interval_secs = 21600
 bazaar_interval_secs = 60
-auction_interval_secs = 90
+# Wait 15 minutes after a complete scan or a failed/abandoned cycle.
+auction_interval_secs = 900
+# Includes page-zero, missing-page requests and HTTP retries across all workers.
+auction_max_requests_per_cycle = 128
+auction_stale_after_secs = 1200
 # Overlap page downloads while retaining one global request-spacing / Retry-After gate.
 auction_page_concurrency = 4
+# Shared by every missing-page wave of a single auction cycle.
 round_timeout_secs = 180
 
 stale_after_secs = 300

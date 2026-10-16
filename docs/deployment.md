@@ -96,6 +96,22 @@ sudo chown -R "$(id -u):$(id -g)" ./data
 安装包不包含 `config.toml`、`.env` 和 `data/`，所以更新保留配置、token 和快照。
 务必先停止再覆盖二进制；手动运行不提供自动回滚。
 
+### 拍卖降频到 15 分钟
+
+升级二进制后，在实际使用的 `config.toml` 中修改已有项并添加缺失项，避免重复 TOML 键：
+
+```toml
+auction_interval_secs = 900
+auction_max_requests_per_cycle = 128
+auction_stale_after_secs = 1200
+round_timeout_secs = 180
+```
+
+在 screen 内 `Ctrl+C` 后重新 `sh run.sh` 生效；若设置了 `PRICE_CONFIG`，修改该变量指向的文件。
+`stale_after_secs = 300` 继续控制 Bazaar；`max_price_age_secs` 默认 3600，无需调整。
+补页共享整个拍卖周期的时间和请求预算（含 HTTP 重试），失败也进入 900 秒冷却；不再无限补页。
+启动脚本保留用户配置，因此仅更新安装包不会自动把旧配置中的 90 改成 900。
+
 ```bash
 screen -r skyblock-price
 # Ctrl+C 停止；在解压目录运行：

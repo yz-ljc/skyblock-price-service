@@ -1,6 +1,9 @@
 use std::{
     io::{self, BufReader, Read},
-    sync::{Arc, Mutex, atomic::Ordering},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     thread,
     time::{Duration, Instant, SystemTime},
 };
@@ -25,6 +28,7 @@ pub struct Upstream {
     state: Arc<State>,
     base: reqwest::Url,
     gate: Arc<Mutex<RequestGate>>,
+    request_budget: Option<Arc<AtomicUsize>>,
 }
 
 struct RequestGate {
@@ -60,11 +64,19 @@ impl Upstream {
             client,
             state,
             base,
+            request_budget: None,
             gate: Arc::new(Mutex::new(RequestGate {
                 last_request: None,
                 cooldown_until: Instant::now(),
             })),
         })
+    }
+
+    /// Auction workers share this budget across waves; other sources remain independent.
+    pub fn with_request_budget(&self, remaining: Arc<AtomicUsize>) -> Self {
+        let mut limited = self.clone();
+        limited.request_budget = Some(remaining);
+        limited
     }
 
     pub fn parse<T, F>(
@@ -134,6 +146,14 @@ impl Upstream {
         let url = self.base.join(path)?;
         for attempt in 0..=self.state.config.request_retries {
             self.request_slot(deadline)?;
+            if let Some(remaining) = &self.request_budget {
+                ensure!(
+                    remaining
+                        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+                        .is_ok(),
+                    "auction cycle request budget exhausted"
+                );
+            }
             self.state
                 .counters
                 .upstream_requests

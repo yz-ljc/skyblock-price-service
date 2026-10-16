@@ -1,7 +1,6 @@
 use std::{
-    collections::hash_map::DefaultHasher,
-    hash::{Hash, Hasher},
     sync::{Arc, atomic::Ordering},
+    time::Instant,
 };
 
 use axum::{
@@ -20,6 +19,7 @@ use crate::{
         AuctionQuote, AuctionSnapshot, BazaarQuote, BazaarSnapshot, CatalogSnapshot, Icon, Variant,
         normalized, now_ms,
     },
+    pagination::{self, Session},
     state::State,
 };
 
@@ -95,7 +95,7 @@ async fn gate(AppState(state): AppState<Arc<State>>, request: Request, next: Nex
     response
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct SourceMeta {
     available: bool,
     last_updated: u64,
@@ -104,19 +104,25 @@ pub struct SourceMeta {
     stale: bool,
 }
 
-fn source_meta(state: &State, updated: u64, fetched: u64, now: u64) -> SourceMeta {
+fn source_meta(
+    state: &State,
+    updated: u64,
+    fetched: u64,
+    now: u64,
+    stale_after_secs: u64,
+) -> SourceMeta {
     let age = (updated > 0).then(|| now.saturating_sub(updated) / 1000);
     SourceMeta {
         available: age.is_some_and(|v| v <= state.config.max_price_age_secs),
         last_updated: updated,
         fetched_at: fetched,
         age_seconds: age,
-        stale: age.is_none_or(|v| v > state.config.stale_after_secs),
+        stale: age.is_none_or(|v| v > stale_after_secs),
     }
 }
 
-#[derive(Serialize)]
-struct Sources {
+#[derive(Clone, Serialize)]
+pub(crate) struct Sources {
     source: &'static str,
     catalog_last_updated: u64,
     bazaar: SourceMeta,
@@ -135,8 +141,20 @@ fn sources(
     Sources {
         source: "Hypixel official API",
         catalog_last_updated: catalog.last_updated,
-        bazaar: source_meta(state, bazaar.last_updated, bazaar.fetched_at, now),
-        auctions: source_meta(state, auctions.last_updated, auctions.fetched_at, now),
+        bazaar: source_meta(
+            state,
+            bazaar.last_updated,
+            bazaar.fetched_at,
+            now,
+            state.config.stale_after_secs,
+        ),
+        auctions: source_meta(
+            state,
+            auctions.last_updated,
+            auctions.fetched_at,
+            now,
+            state.config.auction_stale_after_secs,
+        ),
         skipped_auctions_without_id: auctions.skipped_without_id,
         skipped_auctions_invalid: auctions.skipped_invalid,
     }
@@ -151,7 +169,7 @@ struct SearchParams {
     #[serde(default)]
     only_priced: bool,
 }
-#[derive(Clone, Copy, Deserialize, Hash)]
+#[derive(Clone, Copy, Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum Market {
     Bazaar,
@@ -195,7 +213,11 @@ fn result(
         name: item
             .map(|v| v.name.0.as_str())
             .filter(|name| !name.trim().is_empty())
-            // Auction display names may contain UGC, including in restored snapshots.
+            .or_else(|| {
+                auction
+                    .map(|v| v.name.0.as_str())
+                    .filter(|name| !name.trim().is_empty())
+            })
             .unwrap_or_else(|| {
                 if crate::nbt::validate_id(id).is_ok() {
                     id
@@ -270,37 +292,68 @@ fn has_price(
     }
 }
 
-fn fingerprint(
-    params: &SearchParams,
-    catalog: &CatalogSnapshot,
-    bazaar: &BazaarSnapshot,
-    auctions: &AuctionSnapshot,
-    sources: &Sources,
-    now: u64,
-) -> String {
-    let mut hash = DefaultHasher::new();
-    normalized(&params.q).hash(&mut hash);
-    params.market.hash(&mut hash);
-    params.only_priced.hash(&mut hash);
-    (
-        catalog.last_updated,
-        bazaar.last_updated,
-        auctions.last_updated,
-    )
-        .hash(&mut hash);
-    // Price filtering also changes when quotes expire, even without a new snapshot.
-    if params.only_priced || params.market.is_some() {
-        (sources.bazaar.available, sources.auctions.available).hash(&mut hash);
-        if params.only_priced || matches!(params.market, Some(Market::Auction)) {
-            auctions
-                .items
-                .values()
-                .filter(|v| v.price.ends_at > now)
-                .count()
-                .hash(&mut hash);
-        }
+// Prices and ordering belong to the initial search. Age and expiry still advance
+// on every page so a retained search cannot present an expired BIN as available.
+fn search_page(
+    state: &State,
+    session: &Session<Sources>,
+    id: &str,
+    offset: usize,
+    limit: usize,
+    query: &str,
+) -> Response {
+    let total = session.rows.len();
+    if offset % limit != 0 || (offset > 0 && offset >= total) {
+        return failure(
+            StatusCode::BAD_REQUEST,
+            "invalid_cursor",
+            "Invalid cursor offset",
+        );
     }
-    format!("{:016x}", hash.finish())
+    let now = now_ms();
+    let mut sources = session.metadata.clone();
+    sources.bazaar = source_meta(
+        state,
+        sources.bazaar.last_updated,
+        sources.bazaar.fetched_at,
+        now,
+        state.config.stale_after_secs,
+    );
+    sources.auctions = source_meta(
+        state,
+        sources.auctions.last_updated,
+        sources.auctions.fetched_at,
+        now,
+        state.config.auction_stale_after_secs,
+    );
+    let mut rows = Vec::with_capacity(limit);
+    for row in session.rows.iter().skip(offset).take(limit) {
+        let mut row: serde_json::Value = match serde_json::from_str(row) {
+            Ok(row) => row,
+            Err(_) => {
+                return failure(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "invalid_search_cache",
+                    "Cannot read cached search",
+                );
+            }
+        };
+        if !sources.bazaar.available {
+            row["bazaar"] = serde_json::Value::Null;
+        }
+        if !sources.auctions.available
+            || row["auction"]["ends_at"]
+                .as_u64()
+                .is_some_and(|end| end <= now)
+        {
+            row["auction"] = serde_json::Value::Null;
+        }
+        rows.push(row);
+    }
+    let next_cursor =
+        (offset + rows.len() < total).then(|| format!("{id}:{}", offset + rows.len()));
+    success(json!({ "query": query, "total": total, "items": rows,
+        "next_cursor": next_cursor, "sources": sources }))
 }
 
 async fn search(
@@ -333,6 +386,39 @@ async fn search(
             "limit must be 1 to 50",
         );
     }
+    // Bind cursors to the normalized query, filters AND page size, not refresh timestamps.
+    let context = format!("{q}\n{:?}\n{}\n{limit}", params.market, params.only_priced);
+    let mut searches = state.searches.lock().unwrap_or_else(|v| v.into_inner());
+    searches.prune();
+    if let Some(cursor) = &params.cursor {
+        let parsed = cursor
+            .split_once(':')
+            .filter(|(id, index)| {
+                id.len() == 16
+                    && id.bytes().all(|b| b.is_ascii_hexdigit())
+                    && !index.is_empty()
+                    && index.bytes().all(|b| b.is_ascii_digit())
+            })
+            .and_then(|(id, index)| index.parse::<usize>().ok().map(|offset| (id, offset)));
+        let Some((id, offset)) = parsed.filter(|_| cursor.len() <= 64) else {
+            return failure(StatusCode::BAD_REQUEST, "invalid_cursor", "Invalid cursor");
+        };
+        let Some(session) = searches.get(id) else {
+            return failure(
+                StatusCode::CONFLICT,
+                "search_expired",
+                "Search expired or was evicted; restart search without cursor",
+            );
+        };
+        if session.context != context {
+            return failure(
+                StatusCode::BAD_REQUEST,
+                "cursor_query_mismatch",
+                "Keep the same query, filters and limit when paging",
+            );
+        }
+        return search_page(&state, session, id, offset, limit, &params.q);
+    }
     let catalog = state.catalog.load_full();
     let bazaar = state.bazaar.load_full();
     let auctions = state.auctions.load_full();
@@ -345,48 +431,13 @@ async fn search(
     }
     let now = now_ms();
     let sources = sources(&state, &catalog, &bazaar, &auctions, now);
-    let revision = fingerprint(&params, &catalog, &bazaar, &auctions, &sources, now);
-    let offset = if let Some(cursor) = &params.cursor {
-        if cursor.len() > 64 {
-            return failure(StatusCode::BAD_REQUEST, "invalid_cursor", "Invalid cursor");
-        }
-        let Some((version, index)) = cursor.split_once(':') else {
-            return failure(StatusCode::BAD_REQUEST, "invalid_cursor", "Invalid cursor");
-        };
-        if version != revision {
-            return failure(
-                StatusCode::CONFLICT,
-                "snapshot_changed",
-                "Snapshot changed; restart search without cursor",
-            );
-        }
-        match index.parse::<usize>() {
-            Ok(value)
-                if value
-                    <= state.config.max_catalog_items
-                        + state.config.max_price_entries
-                        + state.config.max_bazaar_products =>
-            {
-                value
-            }
-            _ => {
-                return failure(
-                    StatusCode::BAD_REQUEST,
-                    "invalid_cursor",
-                    "Invalid cursor offset",
-                );
-            }
-        }
-    } else {
-        0
-    };
     let words: Vec<_> = q.split_whitespace().collect();
     let mut c = catalog.items.keys().map(|v| v.0.as_str()).peekable();
     let mut b = bazaar.products.keys().map(|v| v.0.as_str()).peekable();
     let mut a = auctions.items.keys().map(|v| v.0.as_str()).peekable();
-    let mut total = 0;
-    let mut rows = Vec::with_capacity(limit);
-    // Merge three ordered indexes; working memory stays O(page size), even for deep pagination.
+    let mut rows = Vec::new();
+    let mut bytes = 1024; // Includes per-session metadata and bounded query text.
+    // Merge indexes once per search; subsequent pages read the compact frozen rows.
     loop {
         let key = [c.peek().copied(), b.peek().copied(), a.peek().copied()]
             .into_iter()
@@ -429,15 +480,47 @@ async fn search(
         {
             continue;
         }
-        if total >= offset && rows.len() < limit {
-            rows.push(result(key, &catalog, &bazaar, &auctions, &sources, now));
+        let row = match serde_json::to_string(&result(
+            key, &catalog, &bazaar, &auctions, &sources, now,
+        )) {
+            Ok(row) => row.into_boxed_str(),
+            Err(_) => {
+                return failure(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "search_encoding_failed",
+                    "Cannot encode search",
+                );
+            }
+        };
+        bytes += row.len() + std::mem::size_of::<Box<str>>();
+        if bytes > pagination::MAX_SESSION_BYTES {
+            return failure(
+                StatusCode::BAD_REQUEST,
+                "search_too_broad",
+                "Too many results; use a more specific query",
+            );
         }
-        total += 1;
+        rows.push(row);
     }
-    let next_cursor =
-        (offset + rows.len() < total).then(|| format!("{revision}:{}", offset + rows.len()));
-    success(
-        json!({ "query": params.q, "total": total, "items": rows, "next_cursor": next_cursor, "sources": sources }),
+    let session = Session {
+        context,
+        rows: rows.into_boxed_slice(),
+        metadata: sources,
+        created: Instant::now(),
+        bytes,
+    };
+    // Single-page searches do not need a retained session.
+    if session.rows.len() <= limit {
+        return search_page(&state, &session, "", 0, limit, &params.q);
+    }
+    let id = searches.insert(session);
+    search_page(
+        &state,
+        searches.get(&id).expect("just inserted search"),
+        &id,
+        0,
+        limit,
+        &params.q,
     )
 }
 
@@ -522,8 +605,22 @@ async fn ready(AppState(state): AppState<Arc<State>>) -> Response {
     let available = state.running.load(Ordering::Relaxed)
         && !catalog.items.is_empty()
         && now.saturating_sub(catalog.fetched_at) / 1000 <= state.config.max_restore_age_secs
-        && !source_meta(&state, bazaar.last_updated, bazaar.fetched_at, now).stale
-        && !source_meta(&state, auctions.last_updated, auctions.fetched_at, now).stale;
+        && !source_meta(
+            &state,
+            bazaar.last_updated,
+            bazaar.fetched_at,
+            now,
+            state.config.stale_after_secs,
+        )
+        .stale
+        && !source_meta(
+            &state,
+            auctions.last_updated,
+            auctions.fetched_at,
+            now,
+            state.config.auction_stale_after_secs,
+        )
+        .stale;
     if available {
         success(json!({ "ready": true }))
     } else {

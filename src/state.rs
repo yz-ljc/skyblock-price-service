@@ -10,8 +10,10 @@ use arc_swap::ArcSwap;
 use tokio::sync::Semaphore;
 
 use crate::{
+    api::Sources,
     config::Config,
     model::{AuctionSnapshot, BazaarSnapshot, CatalogSnapshot},
+    pagination::SearchCache,
 };
 
 #[derive(Default)]
@@ -41,6 +43,7 @@ pub struct State {
     pub catalog: ArcSwap<CatalogSnapshot>,
     pub bazaar: ArcSwap<BazaarSnapshot>,
     pub auctions: ArcSwap<AuctionSnapshot>,
+    pub searches: Mutex<SearchCache<Sources>>,
     pub running: Arc<AtomicBool>,
     pub refreshing: AtomicBool,
     pub counters: Counters,
@@ -58,6 +61,7 @@ impl State {
             catalog: ArcSwap::from_pointee(CatalogSnapshot::default()),
             bazaar: ArcSwap::from_pointee(BazaarSnapshot::default()),
             auctions: ArcSwap::from_pointee(AuctionSnapshot::default()),
+            searches: Mutex::new(SearchCache::default()),
             running: Arc::new(AtomicBool::new(true)),
             refreshing: AtomicBool::new(false),
             counters: Counters::default(),

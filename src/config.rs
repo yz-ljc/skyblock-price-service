@@ -17,6 +17,8 @@ pub struct Config {
     pub catalog_interval_secs: u64,
     pub bazaar_interval_secs: u64,
     pub auction_interval_secs: u64,
+    pub auction_max_requests_per_cycle: usize,
+    pub auction_stale_after_secs: u64,
     pub auction_page_concurrency: usize,
     pub round_timeout_secs: u64,
     pub stale_after_secs: u64,
@@ -47,7 +49,9 @@ impl Default for Config {
             max_retry_delay_secs: 60,
             catalog_interval_secs: 21600,
             bazaar_interval_secs: 60,
-            auction_interval_secs: 90,
+            auction_interval_secs: 900,
+            auction_max_requests_per_cycle: 128,
+            auction_stale_after_secs: 1200,
             auction_page_concurrency: 4,
             round_timeout_secs: 180,
             stale_after_secs: 300,
@@ -95,6 +99,10 @@ impl Config {
             (1..=8).contains(&self.auction_page_concurrency),
             "invalid auction page concurrency"
         );
+        ensure!(
+            (1..=2000).contains(&self.auction_max_requests_per_cycle),
+            "invalid auction request budget"
+        );
         let url = reqwest::Url::parse(&self.hypixel_base_url)?;
         ensure!(
             url.scheme() == "https"
@@ -138,7 +146,9 @@ impl Config {
             "intervals must be positive"
         );
         ensure!(
-            self.max_price_age_secs >= self.stale_after_secs
+            self.auction_stale_after_secs >= 1
+                && self.max_price_age_secs >= self.auction_stale_after_secs
+                && self.max_price_age_secs >= self.stale_after_secs
                 && self.max_restore_age_secs >= self.max_price_age_secs,
             "invalid snapshot age limits"
         );

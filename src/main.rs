@@ -3,6 +3,7 @@ mod config;
 mod json_stream;
 mod model;
 mod nbt;
+mod pagination;
 mod persist;
 mod state;
 mod sync;
